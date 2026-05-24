@@ -12,6 +12,11 @@ use egui::text::{LayoutJob, TextFormat};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+const PANEL_ROUNDING: f32 = 16.0;
+const CONTROL_ROUNDING: f32 = 12.0;
+const CODE_ROUNDING: f32 = 12.0;
+const TITLE_BUTTON_ROUNDING: f32 = 10.0;
+
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Aissistant")
@@ -185,7 +190,7 @@ impl AssistantApp {
 
         ui.painter().rect_filled(
             rect,
-            egui::Rounding::ZERO,
+            egui::Rounding::same(10.0),
             egui::Color32::from_rgb(17, 20, 24),
         );
         ui.painter().line_segment(
@@ -252,8 +257,8 @@ impl AssistantApp {
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(24, 28, 32))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 64, 73)))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::same(14.0))
+            .rounding(egui::Rounding::same(PANEL_ROUNDING))
+            .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new("Question")
@@ -293,6 +298,7 @@ impl AssistantApp {
                             !self.is_loading,
                             egui::Button::new(send_text)
                                 .fill(egui::Color32::from_rgb(38, 142, 107))
+                                .rounding(egui::Rounding::same(CONTROL_ROUNDING))
                                 .min_size(egui::vec2(82.0, 32.0)),
                         )
                         .clicked();
@@ -319,8 +325,8 @@ impl AssistantApp {
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(20, 23, 27))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 55, 64)))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::same(14.0))
+            .rounding(egui::Rounding::same(PANEL_ROUNDING))
+            .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -346,8 +352,8 @@ impl AssistantApp {
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(24, 28, 32))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 64, 73)))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::same(16.0))
+                    .rounding(egui::Rounding::same(PANEL_ROUNDING))
+                    .inner_margin(egui::Margin::same(18.0))
                     .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new("API")
@@ -389,7 +395,8 @@ impl AssistantApp {
                         .add(
                             egui::Button::new("Save Settings")
                                 .fill(egui::Color32::from_rgb(38, 142, 107))
-                        .min_size(egui::vec2(120.0, 32.0)),
+                                .rounding(egui::Rounding::same(CONTROL_ROUNDING))
+                                .min_size(egui::vec2(120.0, 32.0)),
                         )
                         .clicked()
                     {
@@ -406,6 +413,7 @@ impl AssistantApp {
                         .add(
                             egui::Button::new("Quit App")
                                 .fill(egui::Color32::from_rgb(78, 58, 62))
+                                .rounding(egui::Rounding::same(CONTROL_ROUNDING))
                                 .min_size(egui::vec2(96.0, 32.0)),
                         )
                         .clicked()
@@ -465,6 +473,7 @@ fn title_button(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Re
         )
         .fill(color)
         .stroke(egui::Stroke::new(1.0, color.gamma_multiply(1.25)))
+        .rounding(egui::Rounding::same(TITLE_BUTTON_ROUNDING))
         .min_size(egui::vec2(34.0, 28.0)),
     )
 }
@@ -484,7 +493,8 @@ fn tab_button(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
                 } else {
                     egui::Color32::from_rgb(49, 55, 61)
                 },
-            )),
+            ))
+            .rounding(egui::Rounding::same(CONTROL_ROUNDING)),
     )
     .clicked()
 }
@@ -689,7 +699,7 @@ fn render_code_block(ui: &mut egui::Ui, lang: &str, code: &str) {
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(10, 12, 15))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 55, 64)))
-        .rounding(egui::Rounding::same(6.0))
+        .rounding(egui::Rounding::same(CODE_ROUNDING))
         .inner_margin(egui::Margin::same(10.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -720,7 +730,7 @@ fn render_formula(ui: &mut egui::Ui, formula: &str) {
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(22, 31, 42))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 86, 115)))
-        .rounding(egui::Rounding::same(6.0))
+        .rounding(egui::Rounding::same(CODE_ROUNDING))
         .inner_margin(egui::Margin::same(10.0))
         .show(ui, |ui| {
             ui.label(
@@ -763,6 +773,10 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 35, 40);
     style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(40, 47, 54);
     style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(42, 130, 104);
+    style.visuals.widgets.inactive.rounding = egui::Rounding::same(CONTROL_ROUNDING);
+    style.visuals.widgets.hovered.rounding = egui::Rounding::same(CONTROL_ROUNDING);
+    style.visuals.widgets.active.rounding = egui::Rounding::same(CONTROL_ROUNDING);
+    style.visuals.widgets.open.rounding = egui::Rounding::same(CONTROL_ROUNDING);
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(42, 130, 104);
     style.visuals.hyperlink_color = egui::Color32::from_rgb(142, 196, 255);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
