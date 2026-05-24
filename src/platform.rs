@@ -11,9 +11,14 @@ mod windows_impl {
     use eframe::egui;
     use std::ptr::null_mut;
     use std::sync::mpsc::Sender;
+    use std::sync::Mutex;
     use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT,
+        WPARAM,
+    };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
     };
@@ -22,13 +27,13 @@ mod windows_impl {
         NOTIFYICONDATAW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, IsIconic, IsWindowVisible,
-        LoadIconW, LoadImageW, RegisterClassW, SetForegroundWindow, ShowWindow, TrackPopupMenu,
-        TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HICON, HMENU, IDI_APPLICATION,
-        IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG, SW_RESTORE, SW_SHOW,
-        TPM_RIGHTBUTTON, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER,
-        WNDCLASSW, WS_OVERLAPPED,
+        LoadIconW, LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+        ShowWindow, TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HICON,
+        HMENU, IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG,
+        SW_RESTORE, SW_SHOW, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+        WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSW, WS_OVERLAPPED,
     };
 
     const HOTKEY_ID: i32 = 0xA155;
@@ -38,16 +43,59 @@ mod windows_impl {
     const CMD_EXIT: usize = 1002;
     const APP_TITLE: &str = "Aissistant";
     const MESSAGE_TITLE: &str = "AissistantControlWindow";
+    const SINGLE_INSTANCE_MUTEX: &str = "Local\\Aissistant.SingleInstance";
+    const WM_SHUTDOWN: u32 = WM_APP + 0x155;
+    const WM_SHOW_EXISTING: u32 = WM_APP + 0x156;
 
     static SENDER: OnceLock<Sender<ControlEvent>> = OnceLock::new();
     static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
     static MESSAGE_HWND: OnceLock<usize> = OnceLock::new();
     static TRAY_ICON_PATH: OnceLock<String> = OnceLock::new();
+    static ACTIVE_HOTKEY: OnceLock<Mutex<Option<Hotkey>>> = OnceLock::new();
 
     #[derive(Debug, Clone, Copy)]
     struct Hotkey {
         modifiers: u32,
         key: u32,
+    }
+
+    pub struct SingleInstanceGuard {
+        handle: HANDLE,
+    }
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            unsafe {
+                ReleaseMutex(self.handle);
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    pub fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+        unsafe {
+            let handle = CreateMutexW(null_mut(), 1, wide(SINGLE_INSTANCE_MUTEX).as_ptr());
+            if handle.is_null() {
+                return None;
+            }
+
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                CloseHandle(handle);
+                None
+            } else {
+                Some(SingleInstanceGuard { handle })
+            }
+        }
+    }
+
+    pub fn show_existing_instance() {
+        unsafe {
+            if let Some(hwnd) = find_message_window() {
+                PostMessageW(hwnd, WM_SHOW_EXISTING, 0, 0);
+            } else {
+                show_main_window();
+            }
+        }
     }
 
     pub fn start_control_thread(
@@ -73,6 +121,7 @@ mod windows_impl {
                 modifiers: MOD_CONTROL | MOD_NOREPEAT,
                 key: 0x20,
             });
+            let _ = ACTIVE_HOTKEY.set(Mutex::new(Some(active_hotkey)));
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -82,7 +131,6 @@ mod windows_impl {
 
             UnregisterHotKey(hwnd, HOTKEY_ID);
             delete_tray_icon(hwnd);
-            let _ = active_hotkey;
         });
     }
 
@@ -95,19 +143,36 @@ mod windows_impl {
         let hotkey_config = parse_hotkey(hotkey)?;
 
         unsafe {
+            let previous = ACTIVE_HOTKEY
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|guard| *guard);
+
             UnregisterHotKey(hwnd, HOTKEY_ID);
-            if RegisterHotKey(
-                hwnd,
-                HOTKEY_ID,
-                hotkey_config.modifiers | MOD_NOREPEAT,
-                hotkey_config.key,
-            ) == 0
-            {
+            if register_hotkey_raw(hwnd, hotkey_config) == 0 {
+                if let Some(previous) = previous {
+                    let _ = register_hotkey_raw(hwnd, previous);
+                }
                 return Err(format!("failed to register hotkey: {hotkey_config:?}"));
+            }
+
+            if let Some(active) = ACTIVE_HOTKEY.get() {
+                if let Ok(mut active) = active.lock() {
+                    *active = Some(hotkey_config);
+                }
             }
             add_or_update_tray_icon(hwnd, hotkey, TRAY_ICON_PATH.get().map(String::as_str), true);
         }
         Ok(())
+    }
+
+    pub fn shutdown_control_thread() {
+        if let Some(hwnd) = MESSAGE_HWND.get().copied().map(|value| value as HWND) {
+            unsafe {
+                PostMessageW(hwnd, WM_SHUTDOWN, 0, 0);
+            }
+        }
     }
 
     unsafe fn create_message_window() -> HWND {
@@ -165,8 +230,18 @@ mod windows_impl {
                 request_quit();
                 0
             }
+            WM_SHUTDOWN => {
+                DestroyWindow(hwnd);
+                0
+            }
+            WM_SHOW_EXISTING => {
+                let _ = show_main_window();
+                send_event(ControlEvent::ShowWindow);
+                0
+            }
             WM_DESTROY => {
                 delete_tray_icon(hwnd);
+                PostQuitMessage(0);
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -174,14 +249,7 @@ mod windows_impl {
     }
 
     unsafe fn toggle_main_window() {
-        let Some(hwnd) = find_main_window() else {
-            return;
-        };
-
-        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
+        if show_main_window() {
             send_event(ControlEvent::ShowWindow);
         } else {
             send_event(ControlEvent::ToggleWindow);
@@ -189,6 +257,7 @@ mod windows_impl {
     }
 
     unsafe fn request_quit() {
+        let _ = show_main_window();
         send_event(ControlEvent::QuitRequested);
     }
 
@@ -214,12 +283,37 @@ mod windows_impl {
         (!hwnd.is_null()).then_some(hwnd)
     }
 
+    unsafe fn find_message_window() -> Option<HWND> {
+        let hwnd = FindWindowW(null_mut(), wide(MESSAGE_TITLE).as_ptr());
+        (!hwnd.is_null()).then_some(hwnd)
+    }
+
+    unsafe fn show_main_window() -> bool {
+        let Some(hwnd) = find_main_window() else {
+            return false;
+        };
+
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            true
+        } else {
+            SetForegroundWindow(hwnd);
+            false
+        }
+    }
+
     unsafe fn register_hotkey(hwnd: HWND, hotkey: &str) -> Result<Hotkey, String> {
         let hotkey = parse_hotkey(hotkey)?;
-        if RegisterHotKey(hwnd, HOTKEY_ID, hotkey.modifiers | MOD_NOREPEAT, hotkey.key) == 0 {
+        if register_hotkey_raw(hwnd, hotkey) == 0 {
             return Err(format!("failed to register hotkey: {hotkey:?}"));
         }
         Ok(hotkey)
+    }
+
+    unsafe fn register_hotkey_raw(hwnd: HWND, hotkey: Hotkey) -> i32 {
+        RegisterHotKey(hwnd, HOTKEY_ID, hotkey.modifiers | MOD_NOREPEAT, hotkey.key)
     }
 
     fn parse_hotkey(value: &str) -> Result<Hotkey, String> {
@@ -334,6 +428,14 @@ mod windows_impl {
     use super::ControlEvent;
     use std::sync::mpsc::Sender;
 
+    pub struct SingleInstanceGuard;
+
+    pub fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+        Some(SingleInstanceGuard)
+    }
+
+    pub fn show_existing_instance() {}
+
     pub fn start_control_thread(
         _sender: Sender<ControlEvent>,
         _egui_ctx: eframe::egui::Context,
@@ -345,6 +447,11 @@ mod windows_impl {
     pub fn update_hotkey(_hotkey: &str) -> Result<(), String> {
         Ok(())
     }
+
+    pub fn shutdown_control_thread() {}
 }
 
-pub use windows_impl::{start_control_thread, update_hotkey};
+pub use windows_impl::{
+    acquire_single_instance, show_existing_instance, shutdown_control_thread, start_control_thread,
+    update_hotkey,
+};

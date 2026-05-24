@@ -32,7 +32,27 @@ struct ResponseMessage {
     content: String,
 }
 
-pub fn ask(config: &AppConfig, question: &str) -> Result<String> {
+#[derive(Clone)]
+pub struct ApiClient {
+    client: Client,
+}
+
+impl ApiClient {
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { client }
+    }
+
+    pub fn ask(&self, config: &AppConfig, question: &str) -> Result<String> {
+        ask_with_client(&self.client, config, question)
+    }
+}
+
+fn ask_with_client(client: &Client, config: &AppConfig, question: &str) -> Result<String> {
     if config.api_key.trim().is_empty() {
         return Err(anyhow!("API key is empty"));
     }
@@ -60,11 +80,6 @@ pub fn ask(config: &AppConfig, question: &str) -> Result<String> {
             },
         ],
     };
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("failed to create HTTP client")?;
 
     let response = client
         .post(url)

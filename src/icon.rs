@@ -4,16 +4,10 @@ use image::ImageFormat;
 use std::io::Cursor;
 use std::path::PathBuf;
 
-const APP_ICON: &str = "bc84c63b-6e18-4fd5-82f9-54d1ee493479.png";
-
-pub fn app_icon_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(APP_ICON)
-}
+const APP_ICON_BYTES: &[u8] = include_bytes!("../bc84c63b-6e18-4fd5-82f9-54d1ee493479.png");
 
 pub fn load_window_icon() -> Option<egui::IconData> {
-    let image = image::open(app_icon_path()).ok()?;
+    let image = image::load_from_memory(APP_ICON_BYTES).ok()?;
     let rgba = image.resize(96, 96, FilterType::Lanczos3).to_rgba8();
     let (width, height) = rgba.dimensions();
 
@@ -25,7 +19,7 @@ pub fn load_window_icon() -> Option<egui::IconData> {
 }
 
 pub fn ensure_tray_icon() -> Option<PathBuf> {
-    let image = image::open(app_icon_path()).ok()?;
+    let image = image::load_from_memory(APP_ICON_BYTES).ok()?;
     let resized = image.resize_exact(256, 256, FilterType::Lanczos3);
 
     let mut png = Vec::new();

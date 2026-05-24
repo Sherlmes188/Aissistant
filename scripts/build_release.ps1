@@ -1,8 +1,12 @@
 $ErrorActionPreference = "Stop"
 
-$mingwBin = "D:\code_tool\x86_64-15.2.0-release-win32-seh-ucrt-rt_v13-rev0\mingw64\bin"
-if ((Test-Path $mingwBin) -and (($env:Path -split ";") -notcontains $mingwBin)) {
+$mingwBin = $env:MINGW_BIN
+if ($mingwBin -and (Test-Path $mingwBin) -and (($env:Path -split ";") -notcontains $mingwBin)) {
     $env:Path = "$env:Path;$mingwBin"
+}
+
+if (-not (Get-Command windres -ErrorAction SilentlyContinue)) {
+    Write-Warning "windres was not found. Set MINGW_BIN to your MinGW bin directory if you want the exe icon embedded."
 }
 
 cargo build --release

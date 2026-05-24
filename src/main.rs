@@ -4,7 +4,9 @@ mod api;
 mod config;
 mod icon;
 mod platform;
+mod secret;
 
+use crate::api::ApiClient;
 use crate::config::AppConfig;
 use crate::platform::ControlEvent;
 use eframe::egui;
@@ -17,10 +19,15 @@ const CONTROL_ROUNDING: f32 = 12.0;
 const CODE_ROUNDING: f32 = 12.0;
 const WINDOW_ROUNDING: f32 = 18.0;
 const TITLE_BUTTON_ROUNDING: f32 = 10.0;
-const FOREGROUND_POLL_MS: u64 = 120;
-const BACKGROUND_POLL_MS: u64 = 1000;
-
 fn main() -> eframe::Result<()> {
+    let _single_instance = match platform::acquire_single_instance() {
+        Some(guard) => guard,
+        None => {
+            platform::show_existing_instance();
+            return Ok(());
+        }
+    };
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Aissistant")
         .with_inner_size([720.0, 620.0])
@@ -56,13 +63,16 @@ struct AssistantApp {
     page: Page,
     question: String,
     answer: String,
+    answer_blocks: Vec<AnswerBlock>,
     status: String,
     is_loading: bool,
+    request_id: u64,
     window_visible: bool,
     focus_question_next_frame: bool,
     allow_quit: bool,
-    pending: Option<Receiver<Result<String, String>>>,
+    pending: Option<Receiver<(u64, Result<String, String>)>>,
     control_rx: Receiver<ControlEvent>,
+    api_client: ApiClient,
 }
 
 impl AssistantApp {
@@ -71,6 +81,7 @@ impl AssistantApp {
         configure_style(&cc.egui_ctx);
         let (control_tx, control_rx) = mpsc::channel();
         let config = AppConfig::load();
+        let api_client = ApiClient::new();
         let tray_icon = icon::ensure_tray_icon().map(|path| path.to_string_lossy().to_string());
         platform::start_control_thread(
             control_tx,
@@ -84,13 +95,16 @@ impl AssistantApp {
             page: Page::Chat,
             question: String::new(),
             answer: String::new(),
+            answer_blocks: Vec::new(),
             status: "Ready".to_string(),
             is_loading: false,
+            request_id: 0,
             window_visible: true,
             focus_question_next_frame: true,
             allow_quit: false,
             pending: None,
             control_rx,
+            api_client,
         }
     }
 
@@ -111,47 +125,63 @@ impl AssistantApp {
         }
 
         let config = self.config.clone();
+        let api_client = self.api_client.clone();
         let (tx, rx) = mpsc::channel();
+        let worker_ctx = ctx.clone();
+        self.request_id = self.request_id.wrapping_add(1);
+        let request_id = self.request_id;
 
         self.answer.clear();
+        self.answer_blocks.clear();
         self.status = "Thinking...".to_string();
         self.is_loading = true;
         self.pending = Some(rx);
 
         thread::spawn(move || {
-            let result = api::ask(&config, &question).map_err(|err| err.to_string());
-            let _ = tx.send(result);
+            let result = api_client
+                .ask(&config, &question)
+                .map_err(|err| err.to_string());
+            let _ = tx.send((request_id, result));
+            worker_ctx.request_repaint();
         });
 
         ctx.request_repaint();
     }
 
-    fn poll_pending(&mut self, ctx: &egui::Context, foreground: bool) {
+    fn cancel_request(&mut self) {
+        self.request_id = self.request_id.wrapping_add(1);
+        self.is_loading = false;
+        self.pending = None;
+        self.status = "Canceled".to_string();
+    }
+
+    fn set_answer(&mut self, answer: String) {
+        self.answer_blocks = parse_answer(&answer);
+        self.answer = answer;
+    }
+
+    fn poll_pending(&mut self) {
         let Some(rx) = &self.pending else {
             return;
         };
 
         match rx.try_recv() {
-            Ok(Ok(answer)) => {
-                self.answer = answer;
+            Ok((request_id, Ok(answer))) if request_id == self.request_id => {
+                self.set_answer(answer);
                 self.status = "Done".to_string();
                 self.is_loading = false;
                 self.pending = None;
             }
-            Ok(Err(err)) => {
-                self.answer = err;
+            Ok((request_id, Err(err))) if request_id == self.request_id => {
+                self.set_answer(err);
                 self.status = "Request failed".to_string();
                 self.is_loading = false;
                 self.pending = None;
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                let interval = if foreground {
-                    FOREGROUND_POLL_MS
-                } else {
-                    BACKGROUND_POLL_MS
-                };
-                ctx.request_repaint_after(std::time::Duration::from_millis(interval));
+            Ok(_) => {
+                self.pending = None;
             }
+            Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.status = "Worker disconnected".to_string();
                 self.is_loading = false;
@@ -327,6 +357,19 @@ impl AssistantApp {
                         )
                         .clicked();
 
+                    if ui
+                        .add_enabled(
+                            self.is_loading,
+                            egui::Button::new("Cancel")
+                                .fill(egui::Color32::from_rgb(78, 58, 62))
+                                .rounding(egui::Rounding::same(CONTROL_ROUNDING))
+                                .min_size(egui::vec2(82.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        self.cancel_request();
+                    }
+
                     ui.label(
                         egui::RichText::new("Enter to send, Ctrl+Enter for newline")
                             .small()
@@ -345,6 +388,35 @@ impl AssistantApp {
                 .strong()
                 .color(egui::Color32::from_rgb(226, 230, 235)),
         );
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.answer.trim().is_empty(),
+                    egui::Button::new("Copy Answer")
+                        .fill(egui::Color32::from_rgb(31, 35, 40))
+                        .rounding(egui::Rounding::same(CONTROL_ROUNDING))
+                        .min_size(egui::vec2(110.0, 32.0)),
+                )
+                .clicked()
+            {
+                ui.output_mut(|output| output.copied_text = self.answer.clone());
+            }
+
+            if ui
+                .add_enabled(
+                    !self.answer.trim().is_empty(),
+                    egui::Button::new("Clear")
+                        .fill(egui::Color32::from_rgb(31, 35, 40))
+                        .rounding(egui::Rounding::same(CONTROL_ROUNDING))
+                        .min_size(egui::vec2(74.0, 32.0)),
+                )
+                .clicked()
+            {
+                self.answer.clear();
+                self.answer_blocks.clear();
+                self.status = "Ready".to_string();
+            }
+        });
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(20, 23, 27))
@@ -362,7 +434,7 @@ impl AssistantApp {
                                     .color(egui::Color32::from_rgb(121, 128, 138)),
                             );
                         } else {
-                            render_answer(ui, &self.answer);
+                            render_answer(ui, &self.answer_blocks);
                         }
                     });
             });
@@ -461,7 +533,7 @@ impl eframe::App for AssistantApp {
 
         let minimized = ctx.input(|input| input.viewport().minimized.unwrap_or(false));
         let foreground = self.window_visible && !minimized;
-        self.poll_pending(ctx, foreground);
+        self.poll_pending();
 
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -501,6 +573,10 @@ impl eframe::App for AssistantApp {
                             });
                     });
             });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        platform::shutdown_control_thread();
     }
 }
 
@@ -556,7 +632,7 @@ fn trim_enter_insert(text: &mut String) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum AnswerBlock {
     Paragraph(String),
     Code { lang: String, code: String },
@@ -642,12 +718,12 @@ fn flush_paragraph(blocks: &mut Vec<AnswerBlock>, paragraph: &mut Vec<String>) {
     }
 }
 
-fn render_answer(ui: &mut egui::Ui, text: &str) {
-    for block in parse_answer(text) {
+fn render_answer(ui: &mut egui::Ui, blocks: &[AnswerBlock]) {
+    for block in blocks {
         match block {
-            AnswerBlock::Paragraph(text) => render_paragraph(ui, &text),
-            AnswerBlock::Code { lang, code } => render_code_block(ui, &lang, &code),
-            AnswerBlock::Formula(formula) => render_formula(ui, &formula),
+            AnswerBlock::Paragraph(text) => render_paragraph(ui, text),
+            AnswerBlock::Code { lang, code } => render_code_block(ui, lang, code),
+            AnswerBlock::Formula(formula) => render_formula(ui, formula),
         }
         ui.add_space(8.0);
     }
