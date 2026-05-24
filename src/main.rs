@@ -17,6 +17,8 @@ const CONTROL_ROUNDING: f32 = 12.0;
 const CODE_ROUNDING: f32 = 12.0;
 const WINDOW_ROUNDING: f32 = 18.0;
 const TITLE_BUTTON_ROUNDING: f32 = 10.0;
+const FOREGROUND_POLL_MS: u64 = 120;
+const BACKGROUND_POLL_MS: u64 = 1000;
 
 fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
@@ -70,7 +72,12 @@ impl AssistantApp {
         let (control_tx, control_rx) = mpsc::channel();
         let config = AppConfig::load();
         let tray_icon = icon::ensure_tray_icon().map(|path| path.to_string_lossy().to_string());
-        platform::start_control_thread(control_tx, config.hotkey.clone(), tray_icon);
+        platform::start_control_thread(
+            control_tx,
+            cc.egui_ctx.clone(),
+            config.hotkey.clone(),
+            tray_icon,
+        );
 
         Self {
             config,
@@ -119,7 +126,7 @@ impl AssistantApp {
         ctx.request_repaint();
     }
 
-    fn poll_pending(&mut self, ctx: &egui::Context) {
+    fn poll_pending(&mut self, ctx: &egui::Context, foreground: bool) {
         let Some(rx) = &self.pending else {
             return;
         };
@@ -138,7 +145,12 @@ impl AssistantApp {
                 self.pending = None;
             }
             Err(mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(120));
+                let interval = if foreground {
+                    FOREGROUND_POLL_MS
+                } else {
+                    BACKGROUND_POLL_MS
+                };
+                ctx.request_repaint_after(std::time::Duration::from_millis(interval));
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.status = "Worker disconnected".to_string();
@@ -151,14 +163,15 @@ impl AssistantApp {
     fn poll_control_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.control_rx.try_recv() {
             match event {
-                ControlEvent::WindowHidden => {
-                    self.window_visible = false;
+                ControlEvent::ShowWindow => {
+                    self.show_window(ctx);
                 }
-                ControlEvent::WindowShown => {
-                    self.window_visible = true;
-                    self.page = Page::Chat;
-                    self.focus_question_next_frame = true;
-                    ctx.request_repaint();
+                ControlEvent::ToggleWindow => {
+                    if self.window_visible {
+                        self.hide_window(ctx);
+                    } else {
+                        self.show_window(ctx);
+                    }
                 }
                 ControlEvent::QuitRequested => {
                     self.allow_quit = true;
@@ -170,7 +183,16 @@ impl AssistantApp {
 
     fn hide_window(&mut self, ctx: &egui::Context) {
         self.window_visible = false;
-        platform::hide_main_window();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.window_visible = true;
+        self.page = Page::Chat;
+        self.focus_question_next_frame = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.request_repaint();
     }
 
@@ -435,8 +457,11 @@ impl eframe::App for AssistantApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_pending(ctx);
         self.poll_control_events(ctx);
+
+        let minimized = ctx.input(|input| input.viewport().minimized.unwrap_or(false));
+        let foreground = self.window_visible && !minimized;
+        self.poll_pending(ctx, foreground);
 
         if ctx.input(|input| input.viewport().close_requested()) && !self.allow_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -444,7 +469,11 @@ impl eframe::App for AssistantApp {
         }
 
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.hide_window(ctx);
+        }
+
+        if !foreground {
+            return;
         }
 
         egui::CentralPanel::default()

@@ -1,13 +1,14 @@
 #[derive(Debug, Clone, Copy)]
 pub enum ControlEvent {
-    WindowHidden,
-    WindowShown,
+    ShowWindow,
+    ToggleWindow,
     QuitRequested,
 }
 
 #[cfg(windows)]
 mod windows_impl {
     use super::ControlEvent;
+    use eframe::egui;
     use std::ptr::null_mut;
     use std::sync::mpsc::Sender;
     use std::sync::OnceLock;
@@ -22,10 +23,10 @@ mod windows_impl {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-        DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, IsWindowVisible, LoadIconW,
-        LoadImageW, RegisterClassW, SetForegroundWindow, ShowWindow, TrackPopupMenu,
+        DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, IsIconic, IsWindowVisible,
+        LoadIconW, LoadImageW, RegisterClassW, SetForegroundWindow, ShowWindow, TrackPopupMenu,
         TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HICON, HMENU, IDI_APPLICATION,
-        IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG, SW_HIDE, SW_RESTORE, SW_SHOW,
+        IMAGE_ICON, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG, SW_RESTORE, SW_SHOW,
         TPM_RIGHTBUTTON, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER,
         WNDCLASSW, WS_OVERLAPPED,
     };
@@ -39,6 +40,7 @@ mod windows_impl {
     const MESSAGE_TITLE: &str = "AissistantControlWindow";
 
     static SENDER: OnceLock<Sender<ControlEvent>> = OnceLock::new();
+    static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
     static MESSAGE_HWND: OnceLock<usize> = OnceLock::new();
     static TRAY_ICON_PATH: OnceLock<String> = OnceLock::new();
 
@@ -50,10 +52,12 @@ mod windows_impl {
 
     pub fn start_control_thread(
         sender: Sender<ControlEvent>,
+        egui_ctx: egui::Context,
         hotkey: String,
         icon_path: Option<String>,
     ) {
         let _ = SENDER.set(sender);
+        let _ = EGUI_CTX.set(egui_ctx);
         if let Some(path) = &icon_path {
             let _ = TRAY_ICON_PATH.set(path.clone());
         }
@@ -104,15 +108,6 @@ mod windows_impl {
             add_or_update_tray_icon(hwnd, hotkey, TRAY_ICON_PATH.get().map(String::as_str), true);
         }
         Ok(())
-    }
-
-    pub fn hide_main_window() {
-        unsafe {
-            if let Some(hwnd) = find_main_window() {
-                ShowWindow(hwnd, SW_HIDE);
-                send_event(ControlEvent::WindowHidden);
-            }
-        }
     }
 
     unsafe fn create_message_window() -> HWND {
@@ -183,23 +178,17 @@ mod windows_impl {
             return;
         };
 
-        if IsWindowVisible(hwnd) != 0 {
-            ShowWindow(hwnd, SW_HIDE);
-            send_event(ControlEvent::WindowHidden);
-        } else {
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_SHOW);
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
-            send_event(ControlEvent::WindowShown);
+            send_event(ControlEvent::ShowWindow);
+        } else {
+            send_event(ControlEvent::ToggleWindow);
         }
     }
 
     unsafe fn request_quit() {
-        if let Some(hwnd) = find_main_window() {
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
-        }
         send_event(ControlEvent::QuitRequested);
     }
 
@@ -281,6 +270,9 @@ mod windows_impl {
         if let Some(sender) = SENDER.get() {
             let _ = sender.send(event);
         }
+        if let Some(ctx) = EGUI_CTX.get() {
+            ctx.request_repaint();
+        }
     }
 
     unsafe fn add_or_update_tray_icon(
@@ -344,6 +336,7 @@ mod windows_impl {
 
     pub fn start_control_thread(
         _sender: Sender<ControlEvent>,
+        _egui_ctx: eframe::egui::Context,
         _hotkey: String,
         _icon_path: Option<String>,
     ) {
@@ -352,8 +345,6 @@ mod windows_impl {
     pub fn update_hotkey(_hotkey: &str) -> Result<(), String> {
         Ok(())
     }
-
-    pub fn hide_main_window() {}
 }
 
-pub use windows_impl::{hide_main_window, start_control_thread, update_hotkey};
+pub use windows_impl::{start_control_thread, update_hotkey};
