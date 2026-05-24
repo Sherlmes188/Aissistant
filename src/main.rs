@@ -15,6 +15,7 @@ use std::thread;
 const PANEL_ROUNDING: f32 = 16.0;
 const CONTROL_ROUNDING: f32 = 12.0;
 const CODE_ROUNDING: f32 = 12.0;
+const WINDOW_ROUNDING: f32 = 18.0;
 const TITLE_BUTTON_ROUNDING: f32 = 10.0;
 
 fn main() -> eframe::Result<()> {
@@ -23,7 +24,8 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([720.0, 620.0])
         .with_min_inner_size([480.0, 420.0])
         .with_resizable(true)
-        .with_decorations(false);
+        .with_decorations(false)
+        .with_transparent(true);
 
     if let Some(icon) = icon::load_window_icon() {
         viewport = viewport.with_icon(icon);
@@ -428,6 +430,10 @@ impl AssistantApp {
 }
 
 impl eframe::App for AssistantApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_pending(ctx);
         self.poll_control_events(ctx);
@@ -442,22 +448,28 @@ impl eframe::App for AssistantApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(13, 15, 18)))
+            .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                self.show_title_bar(ui, ctx);
-
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(13, 15, 18))
-                    .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(35, 41, 48)))
+                    .rounding(egui::Rounding::same(WINDOW_ROUNDING))
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                        self.show_header(ui);
-                        ui.separator();
+                        self.show_title_bar(ui, ctx);
 
-                        match self.page {
-                            Page::Chat => self.show_chat(ui, ctx),
-                            Page::Settings => self.show_settings(ui),
-                        }
+                        egui::Frame::none()
+                            .fill(egui::Color32::TRANSPARENT)
+                            .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                                self.show_header(ui);
+                                ui.separator();
+
+                                match self.page {
+                                    Page::Chat => self.show_chat(ui, ctx),
+                                    Page::Settings => self.show_settings(ui),
+                                }
+                            });
                     });
             });
     }
